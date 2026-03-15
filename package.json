@@ -1,0 +1,29 @@
+{
+  "name": "@rupertsworld/daemon",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Install, uninstall, and check background daemons on macOS and Linux",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "node --import tsx --test tests/daemon.test.ts",
+    "test:e2e": "node --import tsx --test tests/e2e.test.ts",
+    "test:all": "node --import tsx --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

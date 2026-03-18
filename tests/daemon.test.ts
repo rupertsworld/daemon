@@ -322,6 +322,45 @@ test("status: unsupported platform throws UnsupportedPlatformError", async () =>
   await assert.rejects(daemon.status(), (err) => err instanceof UnsupportedPlatformError);
 });
 
+test("install: linux includes env vars in systemd unit when provided", async () => {
+  const home = await makeTempHome("daemon-linux-env");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "linux",
+      homeDir: home,
+      env: { PATH: "/home/user/.nvm/versions/node/v22/bin:/usr/bin", NODE_ENV: "production" },
+    });
+
+    await daemon.install();
+
+    const unitFile = join(home, ".config", "systemd", "user", "com.example.test.service");
+    const unit = await readFile(unitFile, "utf8");
+
+    assert.ok(unit.includes("Environment=PATH=/home/user/.nvm/versions/node/v22/bin:/usr/bin"));
+    assert.ok(unit.includes("Environment=NODE_ENV=production"));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: linux omits env lines when no env vars provided", async () => {
+  const home = await makeTempHome("daemon-linux-no-env");
+
+  try {
+    const { daemon } = makeDaemon({ platform: "linux", homeDir: home });
+
+    await daemon.install();
+
+    const unitFile = join(home, ".config", "systemd", "user", "com.example.test.service");
+    const unit = await readFile(unitFile, "utf8");
+
+    assert.ok(!unit.includes("Environment="));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("install: macOS includes env vars in plist when provided", async () => {
   const home = await makeTempHome("daemon-darwin-env");
 

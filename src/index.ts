@@ -75,15 +75,24 @@ function quoteSystemdArg(arg: string): string {
   return `"${arg.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
-function renderUnit(description: string, programArgs: string[]): string {
+function renderUnit(
+  description: string,
+  programArgs: string[],
+  env?: Record<string, string>,
+): string {
   const execStart = programArgs.map(quoteSystemdArg).join(" ");
+  const envLines = env
+    ? Object.entries(env)
+        .map(([k, v]) => `Environment=${k}=${v}`)
+        .join("\n")
+    : "";
   return `[Unit]
 Description=${description}
 
 [Service]
 Type=simple
 ExecStart=${execStart}
-Restart=always
+${envLines ? envLines + "\n" : ""}Restart=always
 RestartSec=5
 
 [Install]
@@ -142,7 +151,7 @@ export class Daemon {
         );
       }
       await mkdir(join(this.home, ".config", "systemd", "user"), { recursive: true });
-      await writeFile(path, renderUnit(this.description, this.programArgs), "utf8");
+      await writeFile(path, renderUnit(this.description, this.programArgs, this.env), "utf8");
       await this.exec("systemctl", ["--user", "daemon-reload"]);
       await this.exec("systemctl", ["--user", "enable", "--now", `${this.name}.service`]);
       return;

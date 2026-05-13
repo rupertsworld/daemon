@@ -9,6 +9,7 @@ The following are rejected with a thrown `Error` *before* any file is written, o
 - **Env var keys** that don't match `/^[A-Za-z_][A-Za-z0-9_]*$/` (POSIX). Examples that throw: `1BAD`, `BAD=KEY`, `BAD KEY`, `BAD&KEY`.
 - **Strings rendered into XML** containing any character in `\x00-\x08`, `\x0B`, `\x0C`, `\x0E-\x1F`. These are forbidden in XML 1.0 and cannot be escaped. Applies to `name`, each program argument, and every env key/value when the target is macOS. Tab (`\x09`), LF (`\x0A`), and CR (`\x0D`) are allowed.
 - **Systemd env values** containing NUL (`\x00`) or newline (`\x0A`). systemd has no representation for either.
+- **Log paths** (`stdoutPath`, `stderrPath`) that are the empty string, or that contain NUL or newline when the target is Linux. (On macOS, log paths are subject to the same XML control-char rule as any other XML-rendered string.)
 
 Validation is loud by design — TV consumers should rely on this rather than silently producing broken service files.
 
@@ -31,6 +32,17 @@ Always emits:
 
 between `KeepAlive` and the optional `EnvironmentVariables` block. No option; right for every consumer of this package.
 
+When `stdoutPath` and/or `stderrPath` are set on `DaemonOptions`, emits between `ProcessType` and the optional `EnvironmentVariables` block:
+
+```xml
+<key>StandardOutPath</key>
+<string>${xmlEscape(stdoutPath)}</string>
+<key>StandardErrorPath</key>
+<string>${xmlEscape(stderrPath)}</string>
+```
+
+Either option may be set independently. When both are set, `StandardOutPath` is emitted before `StandardErrorPath`. Caller is responsible for ensuring the parent directory exists; this package does not `mkdir`.
+
 ## systemd unit (Linux)
 
 `Environment=KEY=VALUE` lines render the value through this rule:
@@ -39,6 +51,15 @@ between `KeepAlive` and the optional `EnvironmentVariables` block. No option; ri
 2. Otherwise emit double-quoted with `\` → `\\` and `"` → `\"`: `Environment=KEY="a b"`, `Environment=KEY="a\"b"`, `Environment=KEY="a\\b"`. UTF-8, spaces, `$`, backticks, `;`, `#`, `*`, `?`, parentheses all survive inside the quoted form.
 
 `ExecStart` arg quoting is handled separately by `quoteSystemdArg` (unchanged from prior versions) and is not part of this spec.
+
+When `stdoutPath` and/or `stderrPath` are set on `DaemonOptions`, emits inside `[Service]`:
+
+```
+StandardOutput=append:${stdoutPath}
+StandardError=append:${stderrPath}
+```
+
+Either may be set independently. `append:` (rather than `file:`) is used so logs survive service restarts. Paths are emitted literally — systemd directives take a literal path; the `Environment=` quoting rules do not apply. Caller is responsible for ensuring the parent directory exists.
 
 ## Why these rules
 

@@ -16,6 +16,8 @@ export type DaemonOptions = {
   command: string;
   args: string[];
   env?: Record<string, string>;
+  stdoutPath?: string;
+  stderrPath?: string;
   platform?: NodeJS.Platform;
   homeDir?: string;
   exec?: ExecFn;
@@ -37,6 +39,21 @@ function unitPath(home: string, name: string): string {
 const invalidXmlCharPattern = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/;
 const envKeyPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const safeSystemdEnvValuePattern = /^[A-Za-z0-9_./:@,=+-]*$/;
+
+type RenderOptions = {
+  programArgs: string[];
+  env?: Record<string, string>;
+  stdoutPath?: string;
+  stderrPath?: string;
+};
+
+type RenderPlistOptions = RenderOptions & {
+  name: string;
+};
+
+type RenderUnitOptions = RenderOptions & {
+  description: string;
+};
 
 function xmlEscape(s: string): string {
   return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -64,11 +81,23 @@ function formatSystemdEnvValue(v: string): string {
   return `"${v.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
-function renderPlist(
-  name: string,
-  programArgs: string[],
-  env?: Record<string, string>,
-): string {
+function validateSystemdPath(path: string): void {
+  if (path === "") {
+    throw new Error("log paths cannot be empty");
+  }
+
+  if (path.includes("\0") || path.includes("\n")) {
+    throw new Error("systemd log paths cannot contain NUL or newline characters");
+  }
+}
+
+function renderPlist({
+  name,
+  programArgs,
+  env,
+  stdoutPath,
+  stderrPath,
+}: RenderPlistOptions): string {
   validateXmlString(name);
 
   const entries = programArgs
@@ -91,6 +120,23 @@ function renderPlist(
     envBlock = `\n  <key>EnvironmentVariables</key>\n  <dict>\n${envEntries}\n  </dict>`;
   }
 
+  let logPathBlock = "";
+  if (stdoutPath !== undefined) {
+    if (stdoutPath === "") {
+      throw new Error("log paths cannot be empty");
+    }
+    validateXmlString(stdoutPath);
+    logPathBlock += `\n  <key>StandardOutPath</key>\n  <string>${xmlEscape(stdoutPath)}</string>`;
+  }
+
+  if (stderrPath !== undefined) {
+    if (stderrPath === "") {
+      throw new Error("log paths cannot be empty");
+    }
+    validateXmlString(stderrPath);
+    logPathBlock += `\n  <key>StandardErrorPath</key>\n  <string>${xmlEscape(stderrPath)}</string>`;
+  }
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -106,7 +152,7 @@ ${entries}
   <key>KeepAlive</key>
   <true/>
   <key>ProcessType</key>
-  <string>Background</string>${envBlock}
+  <string>Background</string>${logPathBlock}${envBlock}
 </dict>
 </plist>
 `;
@@ -117,11 +163,13 @@ function quoteSystemdArg(arg: string): string {
   return `"${arg.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
-function renderUnit(
-  description: string,
-  programArgs: string[],
-  env?: Record<string, string>,
-): string {
+function renderUnit({
+  description,
+  programArgs,
+  env,
+  stdoutPath,
+  stderrPath,
+}: RenderUnitOptions): string {
   const execStart = programArgs.map(quoteSystemdArg).join(" ");
   const envLines = env
     ? Object.entries(env)
@@ -131,13 +179,24 @@ function renderUnit(
         })
         .join("\n")
     : "";
+  let logPathLines = "";
+  if (stdoutPath !== undefined) {
+    validateSystemdPath(stdoutPath);
+    logPathLines += `StandardOutput=append:${stdoutPath}\n`;
+  }
+
+  if (stderrPath !== undefined) {
+    validateSystemdPath(stderrPath);
+    logPathLines += `StandardError=append:${stderrPath}\n`;
+  }
+
   return `[Unit]
 Description=${description}
 
 [Service]
 Type=simple
 ExecStart=${execStart}
-${envLines ? envLines + "\n" : ""}Restart=always
+${envLines ? envLines + "\n" : ""}${logPathLines}Restart=always
 RestartSec=5
 
 [Install]
@@ -162,6 +221,8 @@ export class Daemon {
   private readonly description: string;
   private readonly programArgs: string[];
   private readonly env: Record<string, string> | undefined;
+  private readonly stdoutPath: string | undefined;
+  private readonly stderrPath: string | undefined;
   private readonly platform: NodeJS.Platform;
   private readonly home: string;
   private readonly exec: ExecFn;
@@ -171,6 +232,8 @@ export class Daemon {
     this.description = options.description;
     this.programArgs = [options.command, ...options.args];
     this.env = options.env;
+    this.stdoutPath = options.stdoutPath;
+    this.stderrPath = options.stderrPath;
     this.platform = options.platform ?? process.platform;
     this.home = options.homeDir ?? homedir();
     this.exec = options.exec ?? defaultExec;
@@ -183,7 +246,17 @@ export class Daemon {
         await this.exec("launchctl", ["unload", "-w", path]).catch(() => undefined);
       }
       await mkdir(join(this.home, "Library", "LaunchAgents"), { recursive: true });
-      await writeFile(path, renderPlist(this.name, this.programArgs, this.env), "utf8");
+      await writeFile(
+        path,
+        renderPlist({
+          name: this.name,
+          programArgs: this.programArgs,
+          env: this.env,
+          stdoutPath: this.stdoutPath,
+          stderrPath: this.stderrPath,
+        }),
+        "utf8",
+      );
       await this.exec("launchctl", ["load", "-w", path]);
       return;
     }
@@ -196,7 +269,17 @@ export class Daemon {
         );
       }
       await mkdir(join(this.home, ".config", "systemd", "user"), { recursive: true });
-      await writeFile(path, renderUnit(this.description, this.programArgs, this.env), "utf8");
+      await writeFile(
+        path,
+        renderUnit({
+          description: this.description,
+          programArgs: this.programArgs,
+          env: this.env,
+          stdoutPath: this.stdoutPath,
+          stderrPath: this.stderrPath,
+        }),
+        "utf8",
+      );
       await this.exec("systemctl", ["--user", "daemon-reload"]);
       await this.exec("systemctl", ["--user", "enable", "--now", `${this.name}.service`]);
       return;

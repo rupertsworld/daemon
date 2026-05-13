@@ -49,6 +49,10 @@ await daemon.uninstall();
 | `command`     | `string`                   | yes      | Absolute path to the executable      |
 | `args`        | `string[]`                 | yes      | Arguments passed to the command      |
 | `env`         | `Record<string, string>`   | no       | Environment variables for the daemon |
+| `stdoutPath`  | `string`                   | no       | Path for the daemon's stdout log file (absolute recommended). Caller must pre-create the parent directory. |
+| `stderrPath`  | `string`                   | no       | Path for the daemon's stderr log file (absolute recommended). Caller must pre-create the parent directory. |
+
+Both platforms append to existing log files across restarts — `launchd`'s default behaviour for `StandardOutPath` / `StandardErrorPath`, and `append:` mode on systemd.
 
 ### `daemon.install(): Promise<void>`
 

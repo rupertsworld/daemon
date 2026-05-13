@@ -20,6 +20,8 @@ function makeDaemon(
     exec?: (command: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
     args?: string[];
     env?: Record<string, string>;
+    stdoutPath?: string;
+    stderrPath?: string;
   } = {},
 ): { daemon: Daemon; calls: ExecCall[] } {
   const calls: ExecCall[] = [];
@@ -30,16 +32,20 @@ function makeDaemon(
       return { stdout: "", stderr: "" };
     });
 
-  const daemon = new Daemon({
+  const options = {
     name: overrides.name ?? "com.example.test",
     description: "Test daemon",
     command: "/usr/local/bin/test-daemon",
     args: overrides.args ?? ["--serve"],
     env: overrides.env,
+    stdoutPath: overrides.stdoutPath,
+    stderrPath: overrides.stderrPath,
     platform: overrides.platform ?? "darwin",
     homeDir: overrides.homeDir ?? tmpdir(),
     exec,
-  });
+  };
+
+  const daemon = new Daemon(options);
 
   return { daemon, calls };
 }
@@ -634,6 +640,164 @@ test("install: linux renders empty env values successfully", async () => {
   }
 });
 
+test("install: linux includes stdoutPath only and emits it literally inside [Service]", async () => {
+  const home = await makeTempHome("daemon-linux-stdout-path");
+  const stdoutPath = join(home, "logs with spaces", "stdout.log");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "linux",
+      homeDir: home,
+      stdoutPath,
+    });
+
+    await daemon.install();
+
+    const unitFile = join(home, ".config", "systemd", "user", "com.example.test.service");
+    const unit = await readFile(unitFile, "utf8");
+
+    const serviceIndex = unit.indexOf("[Service]");
+    const stdoutIndex = unit.indexOf(`StandardOutput=append:${stdoutPath}`);
+    const installIndex = unit.indexOf("[Install]");
+
+    assert.ok(stdoutIndex !== -1);
+    assert.ok(!unit.includes("StandardError=append:"));
+    assert.ok(serviceIndex < stdoutIndex);
+    assert.ok(stdoutIndex < installIndex);
+    assert.ok(!unit.includes(`StandardOutput=append:"${stdoutPath}"`));
+    assert.equal(existsSync(join(home, "logs with spaces")), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: linux includes stderrPath only in the systemd unit", async () => {
+  const home = await makeTempHome("daemon-linux-stderr-path");
+  const stderrPath = join(home, "logs", "stderr.log");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "linux",
+      homeDir: home,
+      stderrPath,
+    });
+
+    await daemon.install();
+
+    const unitFile = join(home, ".config", "systemd", "user", "com.example.test.service");
+    const unit = await readFile(unitFile, "utf8");
+
+    assert.ok(!unit.includes("StandardOutput=append:"));
+    assert.ok(unit.includes(`StandardError=append:${stderrPath}`));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: linux includes stdoutPath before stderrPath when both are provided", async () => {
+  const home = await makeTempHome("daemon-linux-both-log-paths");
+  const stdoutPath = join(home, "logs", "stdout.log");
+  const stderrPath = join(home, "logs", "stderr.log");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "linux",
+      homeDir: home,
+      stdoutPath,
+      stderrPath,
+    });
+
+    await daemon.install();
+
+    const unitFile = join(home, ".config", "systemd", "user", "com.example.test.service");
+    const unit = await readFile(unitFile, "utf8");
+
+    const stdoutIndex = unit.indexOf(`StandardOutput=append:${stdoutPath}`);
+    const stderrIndex = unit.indexOf(`StandardError=append:${stderrPath}`);
+
+    assert.ok(stdoutIndex !== -1);
+    assert.ok(stderrIndex !== -1);
+    assert.ok(stdoutIndex < stderrIndex);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: linux rejects stdoutPath containing a newline", async () => {
+  const home = await makeTempHome("daemon-linux-stdout-path-newline");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "linux",
+      homeDir: home,
+      stdoutPath: "/tmp/stdout\nlog",
+    });
+
+    await assert.rejects(daemon.install());
+
+    const unitFile = join(home, ".config", "systemd", "user", "com.example.test.service");
+    assert.equal(existsSync(unitFile), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: linux rejects stderrPath containing NUL", async () => {
+  const home = await makeTempHome("daemon-linux-stderr-path-nul");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "linux",
+      homeDir: home,
+      stderrPath: "/tmp/stderr\u0000log",
+    });
+
+    await assert.rejects(daemon.install());
+
+    const unitFile = join(home, ".config", "systemd", "user", "com.example.test.service");
+    assert.equal(existsSync(unitFile), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: linux rejects empty stderrPath", async () => {
+  const home = await makeTempHome("daemon-linux-stderr-path-empty");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "linux",
+      homeDir: home,
+      stderrPath: "",
+    });
+
+    await assert.rejects(daemon.install());
+
+    const unitFile = join(home, ".config", "systemd", "user", "com.example.test.service");
+    assert.equal(existsSync(unitFile), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: linux omits log path directives when no log paths are provided", async () => {
+  const home = await makeTempHome("daemon-linux-no-log-paths");
+
+  try {
+    const { daemon } = makeDaemon({ platform: "linux", homeDir: home });
+
+    await daemon.install();
+
+    const unitFile = join(home, ".config", "systemd", "user", "com.example.test.service");
+    const unit = await readFile(unitFile, "utf8");
+
+    assert.ok(!unit.includes("StandardOutput=append:"));
+    assert.ok(!unit.includes("StandardError=append:"));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("install: macOS includes env vars in plist when provided", async () => {
   const home = await makeTempHome("daemon-darwin-env");
 
@@ -842,6 +1006,193 @@ test("install: macOS plist always includes ProcessType Background", async () => 
 
     assert.ok(plist.includes("<key>ProcessType</key>"));
     assert.ok(plist.includes("<string>Background</string>"));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: macOS includes stdoutPath only between ProcessType and EnvironmentVariables", async () => {
+  const home = await makeTempHome("daemon-darwin-stdout-path");
+  const stdoutPath = join(home, "logs", "stdout.log");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "darwin",
+      homeDir: home,
+      env: { KEY: "value" },
+      stdoutPath,
+    });
+
+    await daemon.install();
+
+    const plistPath = join(home, "Library", "LaunchAgents", "com.example.test.plist");
+    const plist = await readFile(plistPath, "utf8");
+
+    const processTypeIndex = plist.indexOf("<key>ProcessType</key>");
+    const stdoutIndex = plist.indexOf("<key>StandardOutPath</key>");
+    const envIndex = plist.indexOf("<key>EnvironmentVariables</key>");
+
+    assert.ok(stdoutIndex !== -1);
+    assert.ok(!plist.includes("<key>StandardErrorPath</key>"));
+    assert.ok(plist.includes(`<string>${stdoutPath}</string>`));
+    assert.ok(processTypeIndex < stdoutIndex);
+    assert.ok(stdoutIndex < envIndex);
+    assert.equal(existsSync(join(home, "logs")), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: macOS handles stdoutPath containing spaces literally", async () => {
+  const home = await makeTempHome("daemon-darwin-stdout-path-spaces");
+  const stdoutPath = join(home, "logs with spaces", "stdout.log");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "darwin",
+      homeDir: home,
+      stdoutPath,
+    });
+
+    await daemon.install();
+
+    const plistPath = join(home, "Library", "LaunchAgents", "com.example.test.plist");
+    const plist = await readFile(plistPath, "utf8");
+
+    assert.ok(plist.includes(`<string>${stdoutPath}</string>`));
+    assert.equal(existsSync(join(home, "logs with spaces")), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: macOS includes stderrPath only in the plist", async () => {
+  const home = await makeTempHome("daemon-darwin-stderr-path");
+  const stderrPath = join(home, "logs", "stderr.log");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "darwin",
+      homeDir: home,
+      stderrPath,
+    });
+
+    await daemon.install();
+
+    const plistPath = join(home, "Library", "LaunchAgents", "com.example.test.plist");
+    const plist = await readFile(plistPath, "utf8");
+
+    assert.ok(!plist.includes("<key>StandardOutPath</key>"));
+    assert.ok(plist.includes("<key>StandardErrorPath</key>"));
+    assert.ok(plist.includes(`<string>${stderrPath}</string>`));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: macOS includes stdoutPath before stderrPath when both are provided", async () => {
+  const home = await makeTempHome("daemon-darwin-both-log-paths");
+  const stdoutPath = join(home, "logs", "stdout.log");
+  const stderrPath = join(home, "logs", "stderr.log");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "darwin",
+      homeDir: home,
+      stdoutPath,
+      stderrPath,
+    });
+
+    await daemon.install();
+
+    const plistPath = join(home, "Library", "LaunchAgents", "com.example.test.plist");
+    const plist = await readFile(plistPath, "utf8");
+
+    const stdoutIndex = plist.indexOf("<key>StandardOutPath</key>");
+    const stderrIndex = plist.indexOf("<key>StandardErrorPath</key>");
+
+    assert.ok(stdoutIndex !== -1);
+    assert.ok(stderrIndex !== -1);
+    assert.ok(stdoutIndex < stderrIndex);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: macOS escapes XML-special characters in stdoutPath", async () => {
+  const home = await makeTempHome("daemon-darwin-stdout-path-xml-escape");
+  const stdoutPath = join(home, "logs", "a&b.log");
+  const escapedStdoutPath = stdoutPath.replaceAll("&", "&amp;");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "darwin",
+      homeDir: home,
+      stdoutPath,
+    });
+
+    await daemon.install();
+
+    const plistPath = join(home, "Library", "LaunchAgents", "com.example.test.plist");
+    const plist = await readFile(plistPath, "utf8");
+
+    assert.ok(plist.includes(`<string>${escapedStdoutPath}</string>`));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: macOS rejects stdoutPath containing forbidden XML control characters", async () => {
+  const home = await makeTempHome("daemon-darwin-stdout-path-invalid-xml-control");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "darwin",
+      homeDir: home,
+      stdoutPath: "/tmp/stdout\u0000log",
+    });
+
+    await assert.rejects(daemon.install());
+
+    const plistPath = join(home, "Library", "LaunchAgents", "com.example.test.plist");
+    assert.equal(existsSync(plistPath), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: macOS rejects empty stdoutPath", async () => {
+  const home = await makeTempHome("daemon-darwin-stdout-path-empty");
+
+  try {
+    const { daemon } = makeDaemon({
+      platform: "darwin",
+      homeDir: home,
+      stdoutPath: "",
+    });
+
+    await assert.rejects(daemon.install());
+
+    const plistPath = join(home, "Library", "LaunchAgents", "com.example.test.plist");
+    assert.equal(existsSync(plistPath), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("install: macOS omits log path keys when no log paths are provided", async () => {
+  const home = await makeTempHome("daemon-darwin-no-log-paths");
+
+  try {
+    const { daemon } = makeDaemon({ platform: "darwin", homeDir: home });
+
+    await daemon.install();
+
+    const plistPath = join(home, "Library", "LaunchAgents", "com.example.test.plist");
+    const plist = await readFile(plistPath, "utf8");
+
+    assert.ok(!plist.includes("<key>StandardOutPath</key>"));
+    assert.ok(!plist.includes("<key>StandardErrorPath</key>"));
   } finally {
     await rm(home, { recursive: true, force: true });
   }

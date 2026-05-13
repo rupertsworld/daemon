@@ -34,19 +34,59 @@ function unitPath(home: string, name: string): string {
   return join(home, ".config", "systemd", "user", `${name}.service`);
 }
 
+const invalidXmlCharPattern = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/;
+const envKeyPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const safeSystemdEnvValuePattern = /^[A-Za-z0-9_./:@,=+-]*$/;
+
+function xmlEscape(s: string): string {
+  return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function validateXmlString(s: string): void {
+  if (invalidXmlCharPattern.test(s)) {
+    throw new Error("string contains characters that are not allowed in XML 1.0");
+  }
+}
+
+function validateEnvKey(k: string): void {
+  if (!envKeyPattern.test(k)) {
+    throw new Error(`invalid environment variable key: ${k}`);
+  }
+}
+
+function formatSystemdEnvValue(v: string): string {
+  if (v.includes("\0") || v.includes("\n")) {
+    throw new Error("systemd environment values cannot contain NUL or newline characters");
+  }
+
+  if (safeSystemdEnvValuePattern.test(v)) return v;
+
+  return `"${v.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
 function renderPlist(
   name: string,
   programArgs: string[],
   env?: Record<string, string>,
 ): string {
+  validateXmlString(name);
+
   const entries = programArgs
-    .map((arg) => `    <string>${arg}</string>`)
+    .map((arg) => {
+      validateXmlString(arg);
+      return `    <string>${xmlEscape(arg)}</string>`;
+    })
     .join("\n");
 
   let envBlock = "";
   if (env && Object.keys(env).length > 0) {
     const envEntries = Object.entries(env)
-      .map(([k, v]) => `    <key>${k}</key>\n    <string>${v}</string>`)
+      .map(([k, v]) => {
+        validateXmlString(k);
+        validateEnvKey(k);
+        validateXmlString(v);
+        return `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`;
+      })
       .join("\n");
     envBlock = `\n  <key>EnvironmentVariables</key>\n  <dict>\n${envEntries}\n  </dict>`;
   }
@@ -56,7 +96,7 @@ function renderPlist(
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>${name}</string>
+  <string>${xmlEscape(name)}</string>
   <key>ProgramArguments</key>
   <array>
 ${entries}
@@ -64,7 +104,9 @@ ${entries}
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>${envBlock}
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>${envBlock}
 </dict>
 </plist>
 `;
@@ -83,7 +125,10 @@ function renderUnit(
   const execStart = programArgs.map(quoteSystemdArg).join(" ");
   const envLines = env
     ? Object.entries(env)
-        .map(([k, v]) => `Environment=${k}=${v}`)
+        .map(([k, v]) => {
+          validateEnvKey(k);
+          return `Environment=${k}=${formatSystemdEnvValue(v)}`;
+        })
         .join("\n")
     : "";
   return `[Unit]

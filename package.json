@@ -1,6 +1,6 @@
 {
   "name": "@rupertsworld/daemon",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "Install, uninstall, and check background daemons on macOS and Linux",
   "main": "./dist/index.js",

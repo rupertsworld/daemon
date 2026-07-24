@@ -4,6 +4,10 @@
   "type": "module",
   "description": "Install, uninstall, and check background daemons on macOS and Linux",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rupertsworld/daemon.git"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
